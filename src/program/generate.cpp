@@ -1,4 +1,5 @@
 #include "strata/core/logit_bias.hpp"
+#include "strata/core/review_subset.hpp"
 // src/program/generate.cpp - P2.S6: `strata generate`.
 //
 // THE DRIVER, and the first program in this project that answers a question.  Everything below it is a
@@ -4630,6 +4631,24 @@ int main(int argc, char** argv) {
     // come from the model file) and runs its experts in verify windows only (--spec).
     {
         const strata::core::ModelGeometry& g0 = strata::core::kCompiledGeometry;
+        if (!strata::core::review_subset::configure(o.pack, g0.n_layers, g0.n_expert, g0.n_expert_used, err)) {
+            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            return 1;
+        }
+        if (strata::core::review_subset::active()) {
+            // An immutable map per PROCESS: restart between masks, including all KV/GDN/prefix and expert state.
+            const char* am = std::getenv("STRATA_ARENA_MMAP");
+            if (!o.shared_expert_arena.empty() || (am && am[0] != '0') ||
+                std::filesystem::exists(std::filesystem::path(o.pack) / "experts.bin") || o.native_preset.empty()) {
+                std::fprintf(stderr, "strata generate: review subset requires original GGUF sources, no experts.bin, "
+                                     "no shared arena, and STRATA_ARENA_MMAP unset/0\n");
+                return 2;
+            }
+            std::fprintf(stderr, "STRATA_REVIEW_SUBSET active: %lld/%lld experts per layer; map_fnv1a64=%s; shared experts unchanged\n",
+                         (long long) strata::core::review_subset::state.kept,
+                         (long long) strata::core::review_subset::state.source_experts,
+                         strata::core::review_subset::state.fingerprint.c_str());
+        }
         if (!strata::kernels::cpu::expert_layout_load(o.pack, g0.n_layers, g0.n_expert, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
@@ -4875,6 +4894,17 @@ int main(int argc, char** argv) {
                 if (!strata::core::geometry_from_gguf(model_gguf, g, K, gerr)) {
                     std::fprintf(stderr, "strata generate: %s\n", gerr.c_str());
                     return 1;
+                }
+                if (strata::core::review_subset::active()) {
+                    const auto& subset = strata::core::review_subset::state;
+                    const auto& layout = strata::kernels::cpu::expert_layout();
+                    if (g.n_layers != subset.layers || g.n_expert != subset.source_experts || K != subset.top_k ||
+                        layout.n_expert != subset.kept || layout.n_layers != subset.layers) {
+                        std::fprintf(stderr, "strata generate: review subset does not match native model/pack geometry\n");
+                        return 1;
+                    }
+                    // Only routed experts shrink. Dense/shared weights, top-k and architecture are unchanged.
+                    g.n_expert = subset.kept;
                 }
                 const std::string mismatch = strata::core::compiled_geometry_mismatch(g);
                 if (!mismatch.empty()) {
@@ -13988,6 +14018,9 @@ int main(int argc, char** argv) {
                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
                                        " batch_groups=" + std::to_string(o.batch_groups)).c_str() : "");
+            std::printf("INFO review_subset_schema=1 review_subset_source_experts=%lld review_subset_kept=%lld review_subset_fnv1a64=%s\n",
+                        (long long) strata::core::review_subset::source_count(g.n_expert), (long long) g.n_expert,
+                        strata::core::review_subset::active() ? strata::core::review_subset::state.fingerprint.c_str() : "full");
             if (strata::core::manifest::enabled()) {   // STRATA_MANIFEST: engine choice and budgets (a diagnostic; off by default)
                 auto& M = strata::core::manifest::instance();
                 M.engine("version", STRATA_VERSION);

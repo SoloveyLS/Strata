@@ -1,5 +1,6 @@
 // src/core/expert_source.cpp - the adapter.  See the header for the three clauses of the contract.
 #include "strata/core/expert_source.hpp"
+#include "strata/core/review_subset.hpp"
 #include "strata/core/expert_nibble.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/foresight_swap.hpp"
@@ -1042,7 +1043,7 @@ int FileExpertSource::spans(int64_t layer, int64_t expert, Span* out) const {
         for (int r = 0; r < 3; ++r) {
             const size_t i = (size_t) (3 * layer + r);
             const uint64_t per = role_bytes_[i];
-            const uint8_t* p = role_ptr_[i] + (size_t) ((uint64_t) expert * per);
+            const uint8_t* p = role_ptr_[i] + (size_t) ((uint64_t) review_subset::original(layer, expert) * per);
             const size_t f = (size_t) role_file_[i];
             out[r] = {p, per, f < io_fds_.size() ? io_fds_[f] : -1, (uint64_t) (p - maps_[f].base), at};
             at += per;
@@ -1776,7 +1777,7 @@ bool FileExpertSource::open_gguf(std::string& err) {
             }
             const Map& m = maps_[it->second];
             role_file_[i] = (int) it->second;
-            const uint64_t at = lay.gguf_off[i], bytes = per[r] * (uint64_t) n_expert_;
+            const uint64_t at = lay.gguf_off[i], bytes = per[r] * (uint64_t) review_subset::source_count(n_expert_);
             if (at > m.bytes || bytes > m.bytes - at) {   // check_experts_gguf proved it; the mapping must agree
                 err = "FileExpertSource: an expert span runs past the end of " + path;
                 return false;
@@ -1833,7 +1834,7 @@ bool FileExpertSource::copy_from_files(int64_t layer, int64_t expert, uint8_t* d
         for (int r = 0; r < 3; ++r) {
             const size_t i = (size_t) (3 * layer + r);
             const uint64_t per = role_bytes_[i];
-            std::memcpy(dst + at, role_ptr_[i] + (size_t) ((uint64_t) expert * per), (size_t) per);
+            std::memcpy(dst + at, role_ptr_[i] + (size_t) ((uint64_t) review_subset::original(layer, expert) * per), (size_t) per);
             at += per;
         }
         return true;
@@ -2336,7 +2337,7 @@ bool FileExpertSource::zc_roles(int64_t layer, int64_t expert, const uint8_t** p
     if (std::find(zc_keys_.begin(), zc_keys_.end(), key) == zc_keys_.end()) return false;
     for (int r = 0; r < 3; ++r) {
         const size_t i = (size_t) (3 * layer + r);
-        p[r] = role_ptr_[i] + (size_t) ((uint64_t) expert * role_bytes_[i]);
+        p[r] = role_ptr_[i] + (size_t) ((uint64_t) review_subset::original(layer, expert) * role_bytes_[i]);
     }
     file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
     if (complement_ready_) file_reads_.fetch_add(1, std::memory_order_relaxed);
@@ -2385,7 +2386,7 @@ bool FileExpertSource::advise_pairs(const std::pair<int32_t, int32_t>* pairs, in
         }
         for (int r = 0; r < 3; ++r) {
             const size_t k = (size_t) (3 * l + r);
-            strata::platform::advise_willneed(role_ptr_[k] + (size_t) ((uint64_t) e * role_bytes_[k]), role_bytes_[k]);
+            strata::platform::advise_willneed(role_ptr_[k] + (size_t) ((uint64_t) review_subset::original(l, e) * role_bytes_[k]), role_bytes_[k]);
         }
     }
     return true;
@@ -2435,7 +2436,7 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
             for (const Fill& f : todo)
                 for (int r = 0; r < 3; ++r) {
                     const size_t i = (size_t) (3 * f.layer + r);
-                    ranges.push_back({(PVOID) (role_ptr_[i] + (size_t) ((uint64_t) f.e * role_bytes_[i])),
+                    ranges.push_back({(PVOID) (role_ptr_[i] + (size_t) ((uint64_t) review_subset::original(f.layer, f.e) * role_bytes_[i])),
                                       (SIZE_T) role_bytes_[i]});
                 }
             (void) pvm(GetCurrentProcess(), (ULONG_PTR) ranges.size(), ranges.data(), 0);
@@ -2791,7 +2792,7 @@ bool FileExpertSource::read_direct(const Fill* fills, size_t n) const {
             const size_t i = (size_t) (3 * f.layer + r);
             const uint64_t per = role_bytes_[i];
             const Map& m = maps_[(size_t) role_file_[i]];
-            const uint64_t off = (uint64_t) (role_ptr_[i] - m.base) + (uint64_t) f.e * per;
+            const uint64_t off = (uint64_t) (role_ptr_[i] - m.base) + (uint64_t) review_subset::original(f.layer, f.e) * per;
             const uint64_t a0 = off / kSector * kSector, a1 = (off + per + kSector - 1) / kSector * kSector;
             sc.win.push_back({role_file_[i], a0, a1 - a0, off - a0, per, at, f.dst, 0, 0});
             at += per;
@@ -2911,7 +2912,7 @@ bool FileExpertSource::read_direct(const Fill* fills, size_t n) const {
             const size_t i = (size_t) (3 * f.layer + r);
             const uint64_t per = role_bytes_[i];
             const Map& m = maps_[(size_t) role_file_[i]];
-            const uint64_t off = (uint64_t) (role_ptr_[i] - m.base) + (uint64_t) f.e * per;
+            const uint64_t off = (uint64_t) (role_ptr_[i] - m.base) + (uint64_t) review_subset::original(f.layer, f.e) * per;
             const uint64_t a0 = off / kSector * kSector, a1 = (off + per + kSector - 1) / kSector * kSector;
             sc.win.push_back({role_file_[i], a0, a1 - a0, off - a0, per, at, f.dst, 0, 0});
             at += per;
@@ -3039,7 +3040,7 @@ void FileExpertSource::warm(int64_t layer, const int64_t* experts, int64_t n) {
         if (role_ptr_.empty() || unmapped_) continue;
         for (int r = 0; r < 3; ++r) {
             const size_t i = (size_t) (3 * layer + r);
-            const uint8_t* p = role_ptr_[i] + (size_t) ((uint64_t) e * role_bytes_[i]);
+            const uint8_t* p = role_ptr_[i] + (size_t) ((uint64_t) review_subset::original(layer, e) * role_bytes_[i]);
 #if defined(_WIN32)
             ranges.push_back({(PVOID) p, (SIZE_T) role_bytes_[i]});
 #else
@@ -3384,7 +3385,7 @@ double FileExpertSource::cached_share(int64_t samples) const {
         for (int r = 0; r < 3; ++r) {
             const size_t i = (size_t) (3 * layer + r);
             if (role_ptr_[i] == nullptr || role_bytes_[i] == 0) continue;
-            const uint8_t* p = role_ptr_[i] + (size_t) ((uint64_t) expert * role_bytes_[i]);
+            const uint8_t* p = role_ptr_[i] + (size_t) ((uint64_t) review_subset::original(layer, expert) * role_bytes_[i]);
             const uintptr_t pg = 4096, a = (uintptr_t) p & ~(pg - 1);
             const size_t len = (size_t) ((uintptr_t) p + role_bytes_[i] - a), np = (len + pg - 1) / pg;
             vec.assign(np, 0);
@@ -3513,7 +3514,7 @@ uint64_t FileExpertSource::release(int64_t layer, int64_t expert) {
     uint64_t bytes = 0;
     for (int r = 0; r < 3; ++r) {
         const size_t i = (size_t) (3 * layer + r);
-        bytes += trim(role_ptr_[i] + (size_t) ((uint64_t) expert * role_bytes_[i]), role_bytes_[i]);
+        bytes += trim(role_ptr_[i] + (size_t) ((uint64_t) review_subset::original(layer, expert) * role_bytes_[i]), role_bytes_[i]);
     }
     return bytes;
 #else
@@ -5655,6 +5656,11 @@ void ExpertSource::record_inputs(const std::string& pack_experts, const std::str
 
 bool check_experts_gguf(const std::string& gguf, const strata::kernels::cpu::ExpertLayout& lay, std::string& err) {
     static const char* roles[3] = {"gate", "up", "down"};
+    if (review_subset::active() && (lay.n_layers != review_subset::state.layers || lay.n_expert != review_subset::state.kept)) {
+        err = "review subset: expert source has a different runtime geometry";
+        return false;
+    }
+    const int64_t source_ne = review_subset::source_count(lay.n_expert);
     if (lay.gguf_off.size() != (size_t) (3 * lay.n_layers)) {
         err = "native_experts.txt has no GGUF offsets (a pack older than v2): repack it with tools/iq_pack.py";
         return false;
@@ -5675,16 +5681,16 @@ bool check_experts_gguf(const std::string& gguf, const strata::kernels::cpu::Exp
                 // GGUF order: dim 0 is the row (the input), dim 1 the rows, dim 2 the experts
                 const uint64_t cols = (uint64_t) (r < 2 ? fm.n_embd : fm.n_ff);
                 const uint64_t rows = (uint64_t) (r < 2 ? fm.n_ff : fm.n_embd);
-                const uint64_t bytes = per[r] * (uint64_t) lay.n_expert;
+                const uint64_t bytes = per[r] * (uint64_t) source_ne;
                 const uint64_t payload = f->file_size() - f->data_start();
                 std::string why;
                 if (t == nullptr) why = "is not in it";
                 else if (t->type != want_type)
                     why = std::string("is ") + t->type_name() + ", the pack says type " + std::to_string(want_type);
                 else if (t->shape.size() != 3 || t->shape[0] != cols || t->shape[1] != rows ||
-                         t->shape[2] != (uint64_t) lay.n_expert)
+                         t->shape[2] != (uint64_t) source_ne)
                     why = "is not [" + std::to_string(cols) + ", " + std::to_string(rows) + ", " +
-                          std::to_string(lay.n_expert) + "]";
+                          std::to_string(source_ne) + "]";
                 else if (strata::tensor_payload_bytes(*t) != bytes)
                     why = "is not " + std::to_string(per[r]) + " B per expert";
                 else if (f->data_start() + t->offset != lay.gguf_off[(size_t) (3 * l + r)])
@@ -5731,7 +5737,7 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
     std::atomic<int64_t> next{0};
     std::atomic<bool> bad{false};
 #if defined(_WIN32)
-    if (unbuffered) {
+    if (unbuffered && !review_subset::active()) {
         uint64_t max_chunk = 0;
         for (int64_t l = 0; l < lay.n_layers; ++l) {
             const auto& fm = lay.fmt[(size_t) l];
@@ -5849,6 +5855,12 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
                 }
                 FILE* const f = file.f;
                 const uint64_t src = lay.gguf_off[(size_t) (3 * l + r)];
+                if (review_subset::active()) {
+                    const bool ok = review_subset::copy_role(f, src, per[r], review_subset::state.ids[(size_t) l],
+                        [&](int64_t e) { return dst + dst_blob(l, e) + at[r]; });
+                    if (!ok) { bad = true; return; }
+                    continue;
+                }
                 const uint64_t total = per[r] * (uint64_t) lay.n_expert;
                 const uint64_t chunk = per[r] * 16;           // 16 experts per read
                 buf.resize((size_t) chunk);
